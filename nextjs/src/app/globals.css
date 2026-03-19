@@ -1,0 +1,13 @@
+/* Data/mono values */
+.data-mono {
+  font-family: 'JetBrains Mono', 'Courier New', monospace;
+  font-weight: 500;
+}
+
+/* WCAG focus ring override for non-MUI elements */
+*:focus-visible {
+  outline: 3px solid #1565C0;
+  outline-offset: 2px;
+}
+
+/* Skip to content link (WCAG 2.4.1) */

@@ -1,0 +1,157 @@
+# ================================================================
+# DA40 Preflight Platform — Docker Compose
+#
+# Architecture:
+#   postgres    → Database (roles created by init scripts)
+#   gotrue      → Authentication API (JWT)
+#   postgrest   → Auto REST API from PostgreSQL
+#   nextjs      → Frontend app
+#   nginx       → Reverse proxy (routes /api/* and /*)
+#
+# Start: docker compose up -d
+# Stop:  docker compose down
+# Reset: docker compose down -v && docker compose up -d
+# ================================================================
+
+networks:
+  da40:
+    driver: bridge
+
+volumes:
+  db_data:
+
+services:
+
+  # ── 1. PostgreSQL ─────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: da40_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       postgres
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      # Wait until all init scripts have run (roles exist)
+      test: ["CMD-SHELL", "pg_isready -U postgres && psql -U postgres -c \"SELECT 1 FROM pg_roles WHERE rolname='authenticator'\" | grep -q 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    networks: [da40]
+
+  # ── 2. GoTrue (Authentication) ────────────────────────────
+  gotrue:
+    image: supabase/gotrue:v2.132.3
+    container_name: da40_gotrue
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      GOTRUE_API_HOST:                    0.0.0.0
+      GOTRUE_API_PORT:                    9999
+      API_EXTERNAL_URL:                   ${SITE_URL}
+      GOTRUE_DB_DRIVER:                   postgres
+      GOTRUE_DB_DATABASE_URL:             postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@postgres:5432/postgres
+      GOTRUE_SITE_URL:                    ${SITE_URL}
+      GOTRUE_URI_ALLOW_LIST:              ${SITE_URL}
+      GOTRUE_DISABLE_SIGNUP:              "false"
+      GOTRUE_JWT_SECRET:                  ${JWT_SECRET}
+      GOTRUE_JWT_AUD:                     authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME:      authenticated
+      GOTRUE_JWT_EXP:                     3600
+      GOTRUE_JWT_ADMIN_ROLES:             service_role
+      GOTRUE_EXTERNAL_EMAIL_ENABLED:      "true"
+      GOTRUE_MAILER_AUTOCONFIRM:          ${ENABLE_EMAIL_AUTOCONFIRM}
+      GOTRUE_SMTP_HOST:                   ${SMTP_HOST:-localhost}
+      GOTRUE_SMTP_PORT:                   ${SMTP_PORT:-587}
+      GOTRUE_SMTP_USER:                   ${SMTP_USER:-}
+      GOTRUE_SMTP_PASS:                   ${SMTP_PASS:-}
+      GOTRUE_SMTP_SENDER_NAME:            DA40 Platform
+      GOTRUE_MAILER_URLPATHS_CONFIRMATION: /auth/confirm
+      GOTRUE_MAILER_URLPATHS_RECOVERY:    /auth/reset-password
+    networks: [da40]
+
+  # ── 2b. DB migration (app schema hardening after GoTrue) ──
+  db_migrate:
+    image: postgres:15-alpine
+    container_name: da40_db_migrate
+    restart: "no"
+    depends_on:
+      postgres: { condition: service_healthy }
+      gotrue:   { condition: service_started }
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./postgres/init:/migrations:ro
+    command: >-
+      sh -ec "
+      until psql -h postgres -U postgres -d postgres -Atc 'SELECT 1' | grep -q 1; do
+        sleep 2;
+      done;
+      until psql -h postgres -U postgres -d postgres -Atc \"SELECT 1
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+       WHERE n.nspname = 'auth' AND p.proname = 'uid'\" | grep -q 1; do
+        sleep 2;
+      done;
+      psql -v ON_ERROR_STOP=1 -h postgres -U postgres -d postgres -f /migrations/02_ensure_schema.sql;
+      "
+    networks: [da40]
+
+  # ── 3. PostgREST (REST API) ───────────────────────────────
+  postgrest:
+    image: postgrest/postgrest:v12.0.2
+    container_name: da40_postgrest
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      db_migrate: { condition: service_completed_successfully }
+    environment:
+      PGRST_DB_URI:             postgres://authenticator:${POSTGRES_PASSWORD}@postgres:5432/postgres
+      PGRST_DB_SCHEMAS:         public
+      PGRST_DB_ANON_ROLE:       anon
+      PGRST_JWT_SECRET:         ${JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+      PGRST_LOG_LEVEL:          warn
+    networks: [da40]
+
+  # ── 4. Next.js Frontend ───────────────────────────────────
+  nextjs:
+    build:
+      context: ./nextjs
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_SUPABASE_URL:      ${SITE_URL}/api
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${ANON_KEY}
+    container_name: da40_nextjs
+    restart: unless-stopped
+    depends_on:
+      gotrue:    { condition: service_started }
+      postgrest: { condition: service_started }
+      db_migrate: { condition: service_completed_successfully }
+    environment:
+      NODE_ENV:                       production
+      NEXT_PUBLIC_SUPABASE_URL:       ${SITE_URL}/api
+      NEXT_PUBLIC_SUPABASE_ANON_KEY:  ${ANON_KEY}
+    networks: [da40]
+
+  # ── 5. Nginx (Reverse Proxy) ──────────────────────────────
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: da40_nginx
+    restart: unless-stopped
+    depends_on:
+      - nextjs
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    networks: [da40]
