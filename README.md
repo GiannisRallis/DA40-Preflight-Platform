@@ -13,6 +13,8 @@
 
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-FFDD00?style=flat-square&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/giannisrallis)
 
+> ⚠️ **Disclaimer:** Performance and W&B data are digitized from the Diamond DA-40 D Pilot's Operating Handbook for reference and educational purposes only. Always verify all values against the original POH before flight. This tool is not certified for operational use. The pilot is solely responsible for all flight decisions.
+
 ---
 
 ## 📸 Screenshots
